@@ -1,0 +1,3 @@
+# Nunca subas copias de datos personales al repositorio
+*.json
+!vercel.json

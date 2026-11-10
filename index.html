@@ -374,6 +374,17 @@ const VIEWS = [
 /* ============ Utilities ============ */
 function iso(d){ if(!d) return ''; const x = new Date(d); if (isNaN(x)) return ''; return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0'); }
 function pd(s){ if(!s) return null; const [y,m,d] = String(s).slice(0,10).split('-').map(Number); if(!y) return null; return new Date(y,m-1,d||1); }
+function addMonthsISO(iso, m){ const d=pd(iso); if(!d) return iso; const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+m); const last=new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); d.setDate(Math.min(day,last)); return iso8(d); }
+function iso8(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+// Prórroga automática: si el encargo ya venció, lo avanza por periodos iguales; calcula la fecha límite de preaviso
+function encargoVenc(n){
+  if (!n.finEncargo) { n.fechaPreaviso = undefined; return n; }
+  const m = +n.prorrogaMeses || 0; const hoy = iso8(new Date());
+  if (m>0 && !/^(8|9)\./.test(String(n.estado||''))) { let f=n.finEncargo, k=0; while (f < hoy && k<200) { f=addMonthsISO(f, m); k++; } n.finEncargo=f; }
+  const dias = n.preavisoDias!=null ? +n.preavisoDias : (m>0 ? 15 : 0);
+  const d = pd(n.finEncargo); if (d && dias>0) { d.setDate(d.getDate()-dias); n.fechaPreaviso = iso8(d); } else n.fechaPreaviso = undefined;
+  return n;
+}
 function days(a,b){ const A=pd(a)||a, B=pd(b)||b; if(!A||!B) return null; return Math.round((B-A)/86400000); }
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const eur = (n, short) => { if (n==null || n==='' || isNaN(n)) return '—'; n=+n; if (short && Math.abs(n)>=1e6) return (n/1e6).toLocaleString('es-ES',{maximumFractionDigits:2})+' M€'; if (short && Math.abs(n)>=1e4) return Math.round(n/1e3).toLocaleString('es-ES')+' k€'; return n.toLocaleString('es-ES',{maximumFractionDigits:0})+' €'; };
@@ -587,6 +598,7 @@ function metrics(){
   const vencC = C.filter(c=>c.fechaProx && c.fechaProx<=todayISO);
   const vencO = S.operaciones.filter(o=>o.fechaProx && o.fechaProx<=todayISO && !['Ganada','Perdida'].includes(o.etapa));
   const encargos = activos.filter(i=>i.finEncargo).map(i=>({i,d:days(TODAY,i.finEncargo)})).filter(x=>x.d<=30).sort((a,b)=>a.d-b.d);
+  const preavisos = activos.filter(i=>i.fechaPreaviso).map(i=>({i,d:days(TODAY,i.fechaPreaviso)})).filter(x=>x.d>=0 && x.d<=30).sort((a,b)=>a.d-b.d);
   const opsAbiertas = S.operaciones.filter(o=>!['Ganada','Perdida'].includes(o.etapa));
   return {
     total:I.length, activos, vendidos, propias, cerrados, captados, entrados,
@@ -600,7 +612,7 @@ function metrics(){
     tasaLeads: C.length ? ganados.length/C.length : null,
     tasaContacto: C.length ? trabajados.length/C.length : null,
     calientes: C.filter(c=>c.temperatura==='Caliente'),
-    vencI, vencC, vencO, encargos, opsAbiertas,
+    vencI, vencC, vencO, encargos, preavisos, opsAbiertas,
     honJuego: opsAbiertas.reduce((s,o)=>s+(+o.honEur||((+o.precioOferta||0)*(+o.honPct||0))),0),
     honPond: opsAbiertas.reduce((s,o)=>s+((+o.honEur||((+o.precioOferta||0)*(+o.honPct||0)))*(+o.probabilidad||0)),0)
   };
@@ -649,6 +661,7 @@ function vInicio(){
     ...m.vencI.map(i=>({ico:'⏰', c:'--bad', t:i.proxAccion||'Acción pendiente', s:`${i.direccion} · vencida ${fshort(i.fechaProx)}`, go:'I:'+i.id})),
     ...m.vencC.slice(0,8).map(c=>({ico:'☎︎', c:'--bad', t:c.proxAccion||'Seguimiento pendiente', s:`${nombreC(c)} · ${fshort(c.fechaProx)}`, go:'C:'+c.id})),
     ...m.vencO.map(o=>({ico:'€', c:'--warn', t:o.proxAccion||'Operación pendiente', s:`${o.id} · ${fshort(o.fechaProx)}`, go:'O:'+o.id})),
+    ...m.preavisos.map(x=>({ico:'⏳', c:x.d<=15?'--bad':'--warn', t:x.d===0?'Hoy acaba el plazo de preaviso del encargo':`Preaviso del encargo: quedan ${x.d} días`, s:`${x.i.direccion} · avisar antes del ${fshort(x.i.fechaPreaviso)}`, go:'I:'+x.i.id})),
     ...m.encargos.map(x=>({ico:'✎', c:x.d<0?'--bad':'--warn', t:x.d<0?`Encargo vencido hace ${-x.d} días`:`Encargo vence en ${x.d} días`, s:`${x.i.direccion} · fin ${fshort(x.i.finEncargo)}`, go:'I:'+x.i.id}))
   ];
   return `
@@ -882,7 +895,7 @@ function sheetInm(i){
       <div><span>Días en cartera</span><b>${num(days(i.firma||i.alta, i.fEscritura||TODAY))}</b></div><div><span>Probabilidad de venta</span><b>${esc(i.probabilidad||'—')}</b></div></div>
     ${GAL.html(i.id)}
     <div class="grp"><h5>Seguimiento</h5><div class="list">${li('Próxima acción', esc(i.proxAccion||'Sin definir'))}${li('Fecha', i.fechaProx?fdate(i.fechaProx):'—')}${li('Última acción', i.ultAccion?fdate(i.ultAccion):'—')}</div></div>
-    <div class="grp"><h5>Propietario y encargo</h5><div class="list">${li('Propietario', prop?`<a data-open="C:${prop.id}" href="#">${esc(nombreC(prop))}</a>`:esc(i.propNombre||'—'))}${li('Captación', esc(i.captacion||i.origen||'—'))}${li('Motivo', esc(i.motivo))}${li('Tipo de encargo', esc(i.encargo||'—'))}${li('Fin del encargo', i.finEncargo?`${fdate(i.finEncargo)} <span style="color:${dEnc<0?'var(--bad)':dEnc<=30?'var(--warn)':'var(--ink-3)'}">(${dEnc<0?'vencido':dEnc+' días'})</span>`:'—')}${li('Portales', esc(i.portales))}${li('Fotos / vídeo', esc(i.fotos))}</div></div>
+    <div class="grp"><h5>Propietario y encargo</h5><div class="list">${li('Propietario', prop?`<a data-open="C:${prop.id}" href="#">${esc(nombreC(prop))}</a>`:esc(i.propNombre||'—'))}${li('Captación', esc(i.captacion||i.origen||'—'))}${li('Motivo', esc(i.motivo))}${li('Tipo de encargo', esc(i.encargo||'—'))}${li('Encargo con', esc(i.encargoCon))}${li('Fin del encargo', i.finEncargo?`${fdate(i.finEncargo)} <span style="color:${dEnc<0?'var(--bad)':dEnc<=30?'var(--warn)':'var(--ink-3)'}">(${dEnc<0?'vencido':dEnc+' días'})</span>`:'—')}${li('Prórroga', i.prorrogaMeses?`Automática cada ${esc(i.prorrogaMeses)} meses`:(i.finEncargo?'Sin prórroga automática':''))}${li('Avisar para no renovar antes del', i.fechaPreaviso?(()=>{const dp=days(TODAY,i.fechaPreaviso); return `${fdate(i.fechaPreaviso)} <span style="color:${dp<0?'var(--ink-3)':dp<=15?'var(--bad)':dp<=30?'var(--warn)':'var(--ink-3)'}">(${dp<0?'plazo pasado':dp+' días'})</span>`;})():'')}${li('Portales', esc(i.portales))}${li('Fotos / vídeo', esc(i.fotos))}</div></div>
     <div class="grp"><h5>Recorrido</h5><div class="tline">${ev.map(([a,b])=>`<div class="ev ${b?'done':''}"><b>${a}</b><span>${b?fdate(b):'Pendiente'}</span></div>`).join('')}</div></div>
     ${carac?`<div class="grp"><h5>Características</h5><div class="list">${carac}</div></div>`:''}
     ${i.reforma||i.presupReforma?`<div class="grp"><h5>Potencial reforma</h5><div class="list">${li('¿Potencial reforma?',esc(i.reforma))}${li('Presupuesto estimado',eur(i.presupReforma))}</div></div>`:''}
@@ -965,7 +978,7 @@ function formInm(i){
     ${sec('Propietario')}
     ${refIn('propId','Propietario (contacto del CRM)',i.propId?(i.propId+' · '+(findCon(i.propId)?nombreC(findCon(i.propId)):'')):'','dlCon')}${inp('propNombre','Nombre del propietario (texto libre)',i.propNombre)}
     ${sec('Fechas')}
-    ${inp('alta','Fecha de alta',i.alta||todayISO,'date')}${inp('firma','Firma del encargo',i.firma,'date')}${inp('finEncargo','Fin del encargo',i.finEncargo,'date')}${inp('fReserva','Reserva',i.fReserva,'date')}${inp('fArras','Arras',i.fArras,'date')}${inp('fEscritura','Escritura',i.fEscritura,'date')}
+    ${inp('alta','Fecha de alta',i.alta||todayISO,'date')}${inp('firma','Firma del encargo',i.firma,'date')}${inp('finEncargo','Fin del encargo (vencimiento actual)',i.finEncargo,'date')}${inp('prorrogaMeses','Prórroga automática (meses) · vacío = sin prórroga',i.prorrogaMeses,'number')}${inp('preavisoDias','Preaviso para no renovar (días)',i.preavisoDias!=null?i.preavisoDias:(i.prorrogaMeses?15:''),'number')}${inp('encargoCon','Encargo firmado con',i.encargoCon)}${inp('fReserva','Reserva',i.fReserva,'date')}${inp('fArras','Arras',i.fArras,'date')}${inp('fEscritura','Escritura',i.fEscritura,'date')}
     ${sec('Marketing y reforma')}
     ${sel('fotos','Fotos / vídeo hechos',L.SiNo,i.fotos)}${inp('portales','Portales publicados',i.portales)}${sel('reforma','¿Potencial de reforma?',L.SiNo,i.reforma)}${inp('presupReforma','Presupuesto reforma est. (€)',i.presupReforma,'number')}
     ${sec('Seguimiento')}
@@ -1045,6 +1058,7 @@ function submit(f, t, id){
   const v = readForm(f);
   if (t==='I') { const prev=findInm(id)||{}; if (v.honPct!=null) v.honPct=v.honPct/100; v.propId=idOf(v.propId); if (v.propId && !v.propNombre) v.propNombre=nombreC(findCon(v.propId)||{});
     const n={...prev, ...v, id}; if (v.honEur!=null) { n.honEurManual=true; } else { n.honEurManual=false; n.honEur = n.precio && n.honPct ? Math.round(n.precio*n.honPct) : undefined; } if (v.lat!=null && v.lat!==prev.lat) n.geoAprox=false; if (!n.direccion) return toast('Falta la dirección');
+    encargoVenc(n);
     save('inmuebles', n); sheetEdit=false; drawSheet(); toast('Inmueble guardado'); }
   if (t==='C') { const prev=findCon(id)||{alta:todayISO}; const n={...prev, ...v, id}; if (!n.nombre) return toast('Falta el nombre'); save('contactos', n); sheetEdit=false; drawSheet(); toast('Contacto guardado'); }
   if (t==='O') { const prev=S.operaciones.find(o=>o.id===id)||{}; v.inmuebleId=idOf(v.inmuebleId); v.contactoId=idOf(v.contactoId); if (v.honPct!=null) v.honPct=v.honPct/100; if (v.probabilidad!=null) v.probabilidad=v.probabilidad/100;
